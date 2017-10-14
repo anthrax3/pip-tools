@@ -5,9 +5,14 @@ from __future__ import (absolute_import, division, print_function,
 import copy
 from functools import partial
 from itertools import chain, count
+import logging
 import os
 
 from first import first
+from distutils.version import LooseVersion
+import pip
+from pip import exceptions as pip_exceptions
+from pip.req import req_set
 from pip.req import InstallRequirement
 
 from . import click
@@ -19,6 +24,8 @@ from .utils import (format_requirement, format_specifier, full_groupby,
 
 green = partial(click.style, fg='green')
 magenta = partial(click.style, fg='magenta')
+
+_PIP_VERSION = LooseVersion(pip.__version__)
 
 
 class RequirementSummary(object):
@@ -270,9 +277,101 @@ class Resolver(object):
         changed at any time.
         """
         if ireq.editable:
-            for dependency in self.repository.get_dependencies(ireq):
-                yield dependency
-            return
+            if ireq.source_dir and os.path.exists(ireq.source_dir):
+                # Normally we would use pip to find the dependencies of our
+                # ireq, but if our editable requirement is a locally available
+                # potentially large directory (used for development) we
+                # experience a large waiting time while pip's
+                # RequirementSet._prepare_file will create an archive, and then
+                # these archives will be leaked (e.g. in
+                # %USERPROFILE%\AppData\Local\pip-tools\Cache\pkgs).
+                #
+                # This following code is extracted from
+                # RequirementSet._prepare_file in order to avoid it archiving
+                # a locally available editable requirement.
+                reqset = self.repository.create_requirement_set(ireq)
+
+                abstract_dist = req_set.IsSDist(ireq)
+                abstract_dist.prep_for_dist()
+
+                # ###################### #
+                # # parse dependencies # #
+                # ###################### #
+                dist = abstract_dist.dist(self.repository.finder)
+                if _PIP_VERSION.version[0] >= 9:
+                    from pip.utils import packaging
+                    try:
+                        packaging.check_dist_requires_python(dist)
+                    except pip_exceptions.UnsupportedPythonVersion as e:
+                        if reqset.ignore_requires_python:
+                            logging.warning(e.args[0])
+                        else:
+                            ireq.remove_temporary_source()
+                            raise
+                more_reqs = []
+
+                def add_req(subreq, extras_requested):
+                    sub_install_req = InstallRequirement(
+                        str(subreq),
+                        ireq,
+                        isolated=ireq.isolated,
+                        wheel_cache=ireq._wheel_cache,
+                    )
+                    add_req_kwargs = {}
+                    if _PIP_VERSION.version[0] >= 9:
+                        add_req_kwargs['extras_requested'] = extras_requested
+                    more_reqs.extend(reqset.add_requirement(
+                        sub_install_req, ireq.name,
+                        **add_req_kwargs))
+
+                # We add req_to_install before its dependencies, so that we
+                # can refer to it when adding dependencies.
+                if not reqset.has_requirement(ireq.name):
+                    # 'unnamed' requirements will get added here
+                    reqset.add_requirement(ireq, None)
+
+                ignore_dependencies = False
+                if not ignore_dependencies:
+                    if (ireq.extras):
+                        logging.debug(
+                            "Installing extra requirements: %r",
+                            ','.join(ireq.extras),
+                        )
+                    missing_requested = sorted(
+                        set(ireq.extras) - set(dist.extras)
+                    )
+                    for missing in missing_requested:
+                        logging.warning(
+                            '%s does not provide the extra \'%s\'',
+                            dist, missing
+                        )
+
+                    available_requested = sorted(
+                        set(dist.extras) & set(ireq.extras)
+                    )
+                    for subreq in dist.requires(available_requested):
+                        add_req(subreq, extras_requested=available_requested)
+
+                # cleanup tmp src
+                reqset.reqs_to_cleanup.append(ireq)
+
+                if not ireq.editable and not ireq.satisfied_by:
+                    # XXX: --no-install leads this to report 'Successfully
+                    # downloaded' for only non-editable reqs, even though we took
+                    # action on them.
+                    reqset.successfully_downloaded.append(ireq)
+
+                for dependency in more_reqs:
+                    yield dependency
+
+                return
+
+            else:
+                # Use pip to find dependencies of our ireq.
+                for dependency in self.repository.get_dependencies(ireq):
+                    yield dependency
+                return
+
         elif not is_pinned_requirement(ireq):
             raise TypeError('Expected pinned or editable requirement, got {}'.format(ireq))
 

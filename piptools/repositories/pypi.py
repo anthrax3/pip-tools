@@ -123,6 +123,27 @@ class PyPIRepository(BaseRepository):
             best_candidate.project, best_candidate.version, ireq.extras, constraint=ireq.constraint
         )
 
+    def create_requirement_set(self, ireq):
+        """
+        Factory function to create a RequirementSet from an InstallableRequirement
+        in order to configure cache and download dirs on it.
+        """
+        if ireq.link and not ireq.link.is_artifact:
+            # No download_dir for VCS sources.  This also works around pip
+            # using git-checkout-index, which gets rid of the .git dir.
+            download_dir = None
+        else:
+            download_dir = self._download_dir
+            if not os.path.isdir(download_dir):
+                os.makedirs(download_dir)
+        if not os.path.isdir(self._wheel_download_dir):
+            os.makedirs(self._wheel_download_dir)
+
+        reqset = RequirementSet(
+            self.build_dir, self.source_dir, download_dir=download_dir,
+            wheel_download_dir=self._wheel_download_dir, session=self.session)
+        return reqset
+
     def get_dependencies(self, ireq):
         """
         Given a pinned or an editable InstallRequirement, returns a set of
@@ -133,22 +154,7 @@ class PyPIRepository(BaseRepository):
             raise TypeError('Expected pinned or editable InstallRequirement, got {}'.format(ireq))
 
         if ireq not in self._dependencies_cache:
-            if ireq.link and not ireq.link.is_artifact:
-                # No download_dir for VCS sources.  This also works around pip
-                # using git-checkout-index, which gets rid of the .git dir.
-                download_dir = None
-            else:
-                download_dir = self._download_dir
-                if not os.path.isdir(download_dir):
-                    os.makedirs(download_dir)
-            if not os.path.isdir(self._wheel_download_dir):
-                os.makedirs(self._wheel_download_dir)
-
-            reqset = RequirementSet(self.build_dir,
-                                    self.source_dir,
-                                    download_dir=download_dir,
-                                    wheel_download_dir=self._wheel_download_dir,
-                                    session=self.session)
+            reqset = self.create_requirement_set(ireq)
             self._dependencies_cache[ireq] = reqset._prepare_file(self.finder, ireq)
         return set(self._dependencies_cache[ireq])
 
