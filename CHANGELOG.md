@@ -1,6 +1,7 @@
 # 1.10.2 (UNRELEASED)
 
 Bug Fixes:
+- Fixed long compile durations with an locally available editable requirement
 - Fixed bug causing dependencies from invalid wheels for the current platform to be included ([#571](https://github.com/jazzband/pip-tools/pull/571)).
 - `pip-sync` will respect environment markers in the requirements.txt ([600](https://github.com/jazzband/pip-tools/pull/600)). Thanks @hazmat345
 
